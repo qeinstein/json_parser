@@ -2,6 +2,7 @@ package json_parser
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -61,11 +62,10 @@ func TestParser_Invalid(t *testing.T) {
 		{`{"a": 1,}`, "trailing comma in object is not allowed"},
 		{`{"a" 1}`, "expected ':' after object key"},
 		{`{"a": 1 "b": 2}`, "expected ',' or '}' after object value"},
-		{`{"a": 1`, "unterminated string literal"}, // Or unexpected EOF
+		{`{"a": 1`, "expected ',' or '}'"},
 		{`[1, 2`, "expected ',' or ']'"},
 		{`{} true`, "unexpected token at end of input"},
 		{`123 456`, "unexpected token at end of input"},
-		{`{"a": 1, "a": 2}`, ""}, // Valid in standard JSON (last one wins or both accepted depending on implementation)
 	}
 
 	for _, tc := range tests {
@@ -78,12 +78,8 @@ func TestParser_Invalid(t *testing.T) {
 		}
 		if tc.errMsg != "" {
 			// Verify that the error message contains the expected message snippet
-			if !reflect.ValueOf(err.Error()).String() != "" && !reflect.ValueOf(err.Error()).Kind().String() != "" {
-				// checking error string
-			}
-			// Just a simple check
-			if !reflect.DeepEqual(err != nil, true) {
-				t.Errorf("Expected err, got nil")
+			if !strings.Contains(err.Error(), tc.errMsg) {
+				t.Errorf("For input %q: expected error message containing %q, got %q", tc.input, tc.errMsg, err.Error())
 			}
 		}
 	}
