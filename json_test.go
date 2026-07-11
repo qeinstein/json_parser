@@ -336,3 +336,225 @@ func TestMaxDepthLimit(t *testing.T) {
 	}
 }
 
+func TestDisallowUnknownFields(t *testing.T) {
+	type Simple struct {
+		Name string `json:"name"`
+	}
+
+	input := `{"name":"alice","age":30}`
+	var s Simple
+
+	// Normal unmarshal ignores unknown fields
+	if err := Unmarshal([]byte(input), &s); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if s.Name != "alice" {
+		t.Errorf("Expected name alice, got %q", s.Name)
+	}
+
+	// Strict unmarshal fails on unknown fields
+	err := UnmarshalWithOptions([]byte(input), &s, DecodeOptions{DisallowUnknownFields: true})
+	if err == nil {
+		t.Fatal("Expected error for unknown field, but succeeded")
+	}
+	if !strings.Contains(err.Error(), "json: unknown field \"age\"") {
+		t.Errorf("Expected 'unknown field' error, got: %v", err)
+	}
+}
+
+func TestUseNumber(t *testing.T) {
+	input := `{"val":123.45}`
+
+	// Normal decode turns number into float64
+	var v any
+	if err := Unmarshal([]byte(input), &v); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	m := v.(map[string]any)
+	if _, ok := m["val"].(float64); !ok {
+		t.Errorf("Expected float64, got %T", m["val"])
+	}
+
+	// UseNumber turns number into Number
+	var v2 any
+	dec := NewDecoder(strings.NewReader(input))
+	dec.UseNumber()
+	if err := dec.Decode(&v2); err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+	m2 := v2.(map[string]any)
+	n, ok := m2["val"].(Number)
+	if !ok {
+		t.Errorf("Expected types.Number, got %T", m2["val"])
+	}
+	if n.String() != "123.45" {
+		t.Errorf("Expected '123.45', got %q", n.String())
+	}
+}
+
+func TestCyclicPointer(t *testing.T) {
+	type Node struct {
+		Name string `json:"name"`
+		Next *Node  `json:"next"`
+	}
+
+	node1 := Node{Name: "first"}
+	node2 := Node{Name: "second"}
+	node1.Next = &node2
+	node2.Next = &node1 // create cycle
+
+	_, err := Marshal(node1)
+	if err == nil {
+		t.Fatal("Expected error for cyclic pointer, but succeeded")
+	}
+	if !strings.Contains(err.Error(), "json: unsupported value: encountered a cycle") {
+		t.Errorf("Expected cycle detection error, got: %v", err)
+	}
+}
+
+// Custom text type implementing encoding.TextMarshaler/TextUnmarshaler
+type CustomTextType struct {
+	Text string
+}
+
+func (c CustomTextType) MarshalText() ([]byte, error) {
+	return []byte("text:" + c.Text), nil
+}
+
+func (c *CustomTextType) UnmarshalText(text []byte) error {
+	s := string(text)
+	if strings.HasPrefix(s, "text:") {
+		c.Text = s[len("text:"):]
+	} else {
+		c.Text = s
+	}
+	return nil
+}
+
+func TestTextMarshalerAndUnmarshaler(t *testing.T) {
+	type Wrapper struct {
+		Val CustomTextType `json:"val"`
+	}
+
+	w := Wrapper{Val: CustomTextType{Text: "gopher"}}
+	data, err := Marshal(w)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	expectedJSON := `{"val":"text:gopher"}`
+	if string(data) != expectedJSON {
+		t.Errorf("Expected %q, got %q", expectedJSON, string(data))
+	}
+
+	var w2 Wrapper
+	if err := Unmarshal(data, &w2); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if w2.Val.Text != "gopher" {
+		t.Errorf("Expected 'gopher', got %q", w2.Val.Text)
+	}
+}
+
+func TestHTMLSafeEscaping(t *testing.T) {
+	type Msg struct {
+		Message string `json:"msg"`
+	}
+	m := Msg{Message: "<script>&</script>\u2028"}
+
+	// HTML escaping enabled by default
+	data, err := Marshal(m)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	expectedJSON := `{"msg":"\u003cscript\u003e\u0026\u003c/script\u003e\u2028"}`
+	if string(data) != expectedJSON {
+		t.Errorf("Expected %q, got %q", expectedJSON, string(data))
+	}
+
+	// HTML escaping disabled
+	data2, err := MarshalWithOptions(m, false)
+	if err != nil {
+		t.Fatalf("MarshalWithOptions failed: %v", err)
+	}
+	expectedJSON2 := `{"msg":"<script>&</script>\u2028"}`
+	if string(data2) != expectedJSON2 {
+		t.Errorf("Expected %q, got %q", expectedJSON2, string(data2))
+	}
+}
+
+func TestFormattingHelpers(t *testing.T) {
+	src := []byte(`{  "a"  :   1  , "b"  :  [  2  ,  3  ]  }`)
+	var dst bytes.Buffer
+
+	// Test Compact
+	if err := Compact(&dst, src); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+	expectedCompact := `{"a":1,"b":[2,3]}`
+	if dst.String() != expectedCompact {
+		t.Errorf("Expected Compact %q, got %q", expectedCompact, dst.String())
+	}
+
+	// Test Indent
+	dst.Reset()
+	if err := Indent(&dst, []byte(expectedCompact), "", "  "); err != nil {
+		t.Fatalf("Indent failed: %v", err)
+	}
+	expectedIndent := `{
+  "a": 1,
+  "b": [
+    2,
+    3
+  ]
+}`
+	if dst.String() != expectedIndent {
+		t.Errorf("Expected Indent:\n%s\nGot:\n%s", expectedIndent, dst.String())
+	}
+
+	// Test HTMLEscape
+	dst.Reset()
+	HTMLEscape(&dst, []byte(`{"msg":"<p>&</p>"}`))
+	expectedHTML := `{"msg":"\u003cp\u003e\u0026\u003c/p\u003e"}`
+	if dst.String() != expectedHTML {
+		t.Errorf("Expected HTMLEscape %q, got %q", expectedHTML, dst.String())
+	}
+}
+
+func TestDecoderInputOffset(t *testing.T) {
+	input := `{"a": 1} {"b": 2}`
+	dec := NewDecoder(strings.NewReader(input))
+
+	var a map[string]int
+	if err := dec.Decode(&a); err != nil {
+		t.Fatalf("Decode 1 failed: %v", err)
+	}
+	// The offset should be right after first JSON object
+	if dec.InputOffset() != 8 {
+		t.Errorf("Expected offset 8, got %d", dec.InputOffset())
+	}
+
+	var b map[string]int
+	if err := dec.Decode(&b); err != nil {
+		t.Fatalf("Decode 2 failed: %v", err)
+	}
+}
+
+func TestCaseInsensitiveMatchingFallback(t *testing.T) {
+	type StructWithMixedCase struct {
+		NameField string `json:"NameField"`
+	}
+
+	// JSON key has different casing
+	input := `{"namefield":"bob"}`
+	var s StructWithMixedCase
+	if err := Unmarshal([]byte(input), &s); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if s.NameField != "bob" {
+		t.Errorf("Expected NameField to be 'bob', got %q", s.NameField)
+	}
+}
+
+
+

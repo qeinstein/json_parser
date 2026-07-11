@@ -1,6 +1,7 @@
 package encoder
 
 import (
+	"encoding"
 	"fmt"
 	"json_parser/decoder"
 	"json_parser/types"
@@ -12,8 +13,14 @@ import (
 
 // Marshal returns the JSON encoding of v.
 func Marshal(v any) ([]byte, error) {
+	return MarshalWithOptions(v, true)
+}
+
+// MarshalWithOptions returns the JSON encoding of v with configuration options.
+func MarshalWithOptions(v any, escapeHTML bool) ([]byte, error) {
 	var e encoder
 	e.buf = make([]byte, 0, 256)
+	e.escapeHTML = escapeHTML
 	if err := e.encodeValue(reflect.ValueOf(v)); err != nil {
 		return nil, err
 	}
@@ -22,7 +29,9 @@ func Marshal(v any) ([]byte, error) {
 
 // encoder writes JSON into a byte buffer.
 type encoder struct {
-	buf []byte
+	buf        []byte
+	visited    map[uintptr]bool
+	escapeHTML bool
 }
 
 func (e *encoder) writeByte(b byte) {
@@ -33,6 +42,11 @@ func (e *encoder) writeString(s string) {
 	e.buf = append(e.buf, s...)
 }
 
+var (
+	marshalerType     = reflect.TypeOf((*types.Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+)
+
 // encodeValue writes the JSON representation of a reflect.Value.
 func (e *encoder) encodeValue(v reflect.Value) error {
 	// Handle interfaces and pointers
@@ -41,12 +55,47 @@ func (e *encoder) encodeValue(v reflect.Value) error {
 			e.writeString("null")
 			return nil
 		}
+		if v.Kind() == reflect.Pointer {
+			ptr := v.Pointer()
+			if ptr != 0 {
+				if e.visited == nil {
+					e.visited = make(map[uintptr]bool)
+				}
+				if e.visited[ptr] {
+					return fmt.Errorf("json: unsupported value: encountered a cycle via %s", v.Type())
+				}
+				e.visited[ptr] = true
+				defer delete(e.visited, ptr)
+			}
+		}
 		v = v.Elem()
 	}
 
-	// Check for Marshaler interface
-	if v.CanInterface() {
-		if m, ok := v.Interface().(types.Marshaler); ok {
+	t := v.Type()
+	if t.Implements(marshalerType) && v.CanInterface() {
+		m := v.Interface().(types.Marshaler)
+		data, err := m.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		e.buf = append(e.buf, data...)
+		return nil
+	}
+	if t.Implements(textMarshalerType) && v.CanInterface() {
+		tm := v.Interface().(encoding.TextMarshaler)
+		text, err := tm.MarshalText()
+		if err != nil {
+			return err
+		}
+		e.encodeString(string(text))
+		return nil
+	}
+
+	// Check addressable value for pointer-receiver Marshaler / TextMarshaler
+	if v.CanAddr() {
+		ta := v.Addr().Type()
+		if ta.Implements(marshalerType) {
+			m := v.Addr().Interface().(types.Marshaler)
 			data, err := m.MarshalJSON()
 			if err != nil {
 				return err
@@ -54,16 +103,13 @@ func (e *encoder) encodeValue(v reflect.Value) error {
 			e.buf = append(e.buf, data...)
 			return nil
 		}
-	}
-
-	// Check addressable value for pointer-receiver Marshaler
-	if v.CanAddr() {
-		if m, ok := v.Addr().Interface().(types.Marshaler); ok {
-			data, err := m.MarshalJSON()
+		if ta.Implements(textMarshalerType) {
+			tm := v.Addr().Interface().(encoding.TextMarshaler)
+			text, err := tm.MarshalText()
 			if err != nil {
 				return err
 			}
-			e.buf = append(e.buf, data...)
+			e.encodeString(string(text))
 			return nil
 		}
 	}
@@ -159,6 +205,19 @@ func (e *encoder) encodeString(s string) {
 				e.writeByte(hexDigits[b&0xf])
 			}
 			i++
+		case b == '<' || b == '>' || b == '&':
+			if e.escapeHTML {
+				if b == '<' {
+					e.writeString(`\u003c`)
+				} else if b == '>' {
+					e.writeString(`\u003e`)
+				} else {
+					e.writeString(`\u0026`)
+				}
+			} else {
+				e.writeByte(b)
+			}
+			i++
 		case b < utf8.RuneSelf:
 			e.writeByte(b)
 			i++
@@ -166,6 +225,10 @@ func (e *encoder) encodeString(s string) {
 			r, size := utf8.DecodeRuneInString(s[i:])
 			if r == utf8.RuneError && size == 1 {
 				e.writeString(`\ufffd`)
+			} else if r == '\u2028' {
+				e.writeString(`\u2028`)
+			} else if r == '\u2029' {
+				e.writeString(`\u2029`)
 			} else {
 				e.writeString(s[i : i+size])
 			}

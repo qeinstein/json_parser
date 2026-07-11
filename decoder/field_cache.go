@@ -17,8 +17,9 @@ type FieldMeta struct {
 
 // StructMeta holds cached metadata about a Go struct's fields for fast JSON key lookup.
 type StructMeta struct {
-	Fields []FieldMeta        // all fields in order
-	ByKey  map[string]int     // JSON key name -> index into Fields slice
+	Fields      []FieldMeta        // all fields in order
+	ByKey       map[string]int     // JSON key name -> index into Fields slice
+	ByFoldedKey map[string]int     // case-folded JSON key name -> index into Fields slice
 }
 
 var (
@@ -52,8 +53,9 @@ func GetStructMeta(t reflect.Type) *StructMeta {
 // It recursively flattens anonymous (embedded) struct fields, matching the behavior of encoding/json.
 func buildStructMeta(t reflect.Type) *StructMeta {
 	meta := &StructMeta{
-		Fields: make([]FieldMeta, 0, t.NumField()),
-		ByKey:  make(map[string]int, t.NumField()),
+		Fields:      make([]FieldMeta, 0, t.NumField()),
+		ByKey:       make(map[string]int, t.NumField()),
+		ByFoldedKey: make(map[string]int, t.NumField()),
 	}
 
 	collectFields(t, nil, meta)
@@ -123,6 +125,10 @@ func collectFields(t reflect.Type, parentIndex []int, meta *StructMeta) {
 			Type:      f.Type,
 		})
 		meta.ByKey[key] = idx
+		folded := strings.ToLower(key)
+		if _, exists := meta.ByFoldedKey[folded]; !exists {
+			meta.ByFoldedKey[folded] = idx
+		}
 	}
 }
 

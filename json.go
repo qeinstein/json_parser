@@ -16,8 +16,11 @@ type (
 	Number      = types.Number
 )
 
-// ParseError is exported from decoder package using a type alias
-type ParseError = decoder.ParseError
+// ParseError and DecodeOptions are exported from decoder package using type aliases
+type (
+	ParseError    = decoder.ParseError
+	DecodeOptions = decoder.DecodeOptions
+)
 
 // Parse takes a JSON byte slice and returns the parsed Go data structures.
 func Parse(data []byte) (any, error) {
@@ -31,9 +34,19 @@ func Unmarshal(data []byte, v any) error {
 	return decoder.Unmarshal(data, v)
 }
 
+// UnmarshalWithOptions parses the JSON-encoded data with options and stores the result in the value pointed to by v.
+func UnmarshalWithOptions(data []byte, v any, opts DecodeOptions) error {
+	return decoder.UnmarshalWithOptions(data, v, opts)
+}
+
 // Marshal returns the JSON encoding of v.
 func Marshal(v any) ([]byte, error) {
 	return encoder.Marshal(v)
+}
+
+// MarshalWithOptions returns the JSON encoding of v with configuration options.
+func MarshalWithOptions(v any, escapeHTML bool) ([]byte, error) {
+	return encoder.MarshalWithOptions(v, escapeHTML)
 }
 
 // Valid reports whether data is a valid JSON encoding.
