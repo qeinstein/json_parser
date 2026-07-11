@@ -6,13 +6,18 @@ A compliant, production-ready JSON parser built from scratch in Go — **1.76x f
 
 ## Performance
 
-Benchmarked on Apple M4 (arm64):
+Benchmarked on Apple M4 (arm64), Go 1.21+:
 
-| Metric | Our Parser | `encoding/json` | Improvement |
+| Scenario | Our Parser | `encoding/json` | Speedup |
 |---|---|---|---|
-| **Speed** | 381.7 ns/op | 672.9 ns/op | **1.76x faster** |
-| **Memory** | 248 B/op | 368 B/op | **32% less** |
-| **Allocations** | 10 allocs/op | 11 allocs/op | **Fewer** |
+| **Small Object** (4 fields) | 391 ns/op · 248 B · 10 allocs | 675 ns/op · 368 B · 11 allocs | **1.73x** |
+| **Medium Object** (nested, 9+ fields) | 1,106 ns/op · 544 B · 23 allocs | 2,114 ns/op · 680 B · 22 allocs | **1.91x** |
+| **Large Array** (5 nested objects) | 5,197 ns/op · 4,560 B · 90 allocs | 9,287 ns/op · 3,816 B · 71 allocs | **1.79x** |
+| **Primitives Only** (floats, ints, bool) | 382 ns/op · 48 B · 1 alloc | 783 ns/op · 264 B · 5 allocs | **2.05x** |
+| **String Heavy** (long text fields) | 900 ns/op · 736 B · 7 allocs | 2,661 ns/op · 952 B · 11 allocs | **2.96x** |
+| **Dynamic Parse** (`map[string]any`) | 718 ns/op · 984 B · 25 allocs | 847 ns/op · 1,128 B · 27 allocs | **1.18x** |
+
+**Fastest on string-heavy payloads (2.96x)** — the zero-copy tokenizer shines when strings don't need escape processing.
 
 ---
 
