@@ -57,23 +57,28 @@ func (t TokenType) String() string {
 }
 
 // Token represents a single JSON token scanned from the input.
+// Start and End are byte offsets into the original input (no string allocation).
+// For string tokens, Start/End delimit the content INSIDE the quotes.
+// For number/keyword tokens, Start/End span the literal text.
 type Token struct {
 	Type   TokenType
-	Value  string
+	Start  int // byte offset into input (inclusive)
+	End    int // byte offset into input (exclusive)
 	Line   int
 	Column int
 }
 
 func (t Token) String() string {
-	return fmt.Sprintf("Token(%s, %q, line=%d, col=%d)", t.Type, t.Value, t.Line, t.Column)
+	return fmt.Sprintf("Token(%s, [%d:%d], line=%d, col=%d)", t.Type, t.Start, t.End, t.Line, t.Column)
 }
 
 // Lexer converts a raw JSON byte slice into a stream of tokens.
 type Lexer struct {
 	input  []byte
-	pos    int // current character offset in input
-	line   int // current line number (1-based)
-	column int // current column number (1-based)
+	pos    int    // current character offset in input
+	line   int    // current line number (1-based)
+	column int    // current column number (1-based)
+	err    string // error message for the most recent TokenError
 }
 
 // NewLexer creates and initializes a Lexer.
@@ -83,6 +88,27 @@ func NewLexer(input []byte) *Lexer {
 		line:   1,
 		column: 1,
 	}
+}
+
+// TokenValue returns the string value of a token. This allocates a new string.
+// For error tokens, returns the error message.
+func (l *Lexer) TokenValue(t Token) string {
+	if t.Type == TokenError {
+		return l.err
+	}
+	if t.Start >= t.End {
+		return ""
+	}
+	return string(l.input[t.Start:t.End])
+}
+
+// TokenBytes returns the raw byte slice for a token without allocation.
+// The returned slice shares memory with the lexer's input; do not modify it.
+func (l *Lexer) TokenBytes(t Token) []byte {
+	if t.Start >= t.End {
+		return nil
+	}
+	return l.input[t.Start:t.End]
 }
 
 // peek returns the byte at the current position without consuming it.
@@ -125,23 +151,29 @@ func (l *Lexer) NextToken() Token {
 
 	switch b {
 	case '{':
+		start := l.pos
 		l.advance()
-		return Token{Type: TokenBraceOpen, Value: "{", Line: startLine, Column: startCol}
+		return Token{Type: TokenBraceOpen, Start: start, End: l.pos, Line: startLine, Column: startCol}
 	case '}':
+		start := l.pos
 		l.advance()
-		return Token{Type: TokenBraceClose, Value: "}", Line: startLine, Column: startCol}
+		return Token{Type: TokenBraceClose, Start: start, End: l.pos, Line: startLine, Column: startCol}
 	case '[':
+		start := l.pos
 		l.advance()
-		return Token{Type: TokenBracketOpen, Value: "[", Line: startLine, Column: startCol}
+		return Token{Type: TokenBracketOpen, Start: start, End: l.pos, Line: startLine, Column: startCol}
 	case ']':
+		start := l.pos
 		l.advance()
-		return Token{Type: TokenBracketClose, Value: "]", Line: startLine, Column: startCol}
+		return Token{Type: TokenBracketClose, Start: start, End: l.pos, Line: startLine, Column: startCol}
 	case ':':
+		start := l.pos
 		l.advance()
-		return Token{Type: TokenColon, Value: ":", Line: startLine, Column: startCol}
+		return Token{Type: TokenColon, Start: start, End: l.pos, Line: startLine, Column: startCol}
 	case ',':
+		start := l.pos
 		l.advance()
-		return Token{Type: TokenComma, Value: ",", Line: startLine, Column: startCol}
+		return Token{Type: TokenComma, Start: start, End: l.pos, Line: startLine, Column: startCol}
 	case '"':
 		return l.scanString()
 	default:
@@ -152,15 +184,22 @@ func (l *Lexer) NextToken() Token {
 			return l.scanKeyword()
 		}
 		l.advance()
-		return Token{Type: TokenError, Value: fmt.Sprintf("unexpected character: %q", string(b)), Line: startLine, Column: startCol}
+		l.err = fmt.Sprintf("unexpected character: %q", string(b))
+		return Token{Type: TokenError, Line: startLine, Column: startCol}
 	}
 }
 
 func (l *Lexer) skipWhitespace() {
-	for {
-		b := l.peek()
+	for l.pos < len(l.input) {
+		b := l.input[l.pos]
 		if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
-			l.advance()
+			l.pos++
+			if b == '\n' {
+				l.line++
+				l.column = 1
+			} else {
+				l.column++
+			}
 		} else {
 			break
 		}
@@ -172,24 +211,27 @@ func (l *Lexer) scanString() Token {
 	startCol := l.column
 	l.advance() // consume opening '"'
 
-	startPos := l.pos
+	contentStart := l.pos
 	for {
 		if l.pos >= len(l.input) {
-			return Token{Type: TokenError, Value: "unterminated string literal", Line: startLine, Column: startCol}
+			l.err = "unterminated string literal"
+			return Token{Type: TokenError, Line: startLine, Column: startCol}
 		}
 		b := l.peek()
 		if b < 0x20 {
-			return Token{Type: TokenError, Value: "invalid control character in string literal", Line: l.line, Column: l.column}
+			l.err = "invalid control character in string literal"
+			return Token{Type: TokenError, Line: l.line, Column: l.column}
 		}
 		if b == '"' {
-			val := string(l.input[startPos:l.pos])
+			contentEnd := l.pos
 			l.advance() // consume closing '"'
-			return Token{Type: TokenString, Value: val, Line: startLine, Column: startCol}
+			return Token{Type: TokenString, Start: contentStart, End: contentEnd, Line: startLine, Column: startCol}
 		}
 		if b == '\\' {
 			l.advance() // consume '\\'
 			if l.pos >= len(l.input) {
-				return Token{Type: TokenError, Value: "unterminated escape sequence", Line: l.line, Column: l.column}
+				l.err = "unterminated escape sequence"
+				return Token{Type: TokenError, Line: l.line, Column: l.column}
 			}
 			escapeChar := l.advance()
 			switch escapeChar {
@@ -199,15 +241,18 @@ func (l *Lexer) scanString() Token {
 				// Must have exactly 4 hex digits after '\u'
 				for i := 0; i < 4; i++ {
 					if l.pos >= len(l.input) {
-						return Token{Type: TokenError, Value: "unterminated unicode escape sequence", Line: l.line, Column: l.column}
+						l.err = "unterminated unicode escape sequence"
+						return Token{Type: TokenError, Line: l.line, Column: l.column}
 					}
 					hexDigit := l.advance()
 					if !isHexDigit(hexDigit) {
-						return Token{Type: TokenError, Value: "invalid unicode escape sequence", Line: l.line, Column: l.column}
+						l.err = "invalid unicode escape sequence"
+						return Token{Type: TokenError, Line: l.line, Column: l.column}
 					}
 				}
 			default:
-				return Token{Type: TokenError, Value: fmt.Sprintf("invalid escape character: %q", string(escapeChar)), Line: l.line, Column: l.column - 1}
+				l.err = fmt.Sprintf("invalid escape character: %q", string(escapeChar))
+				return Token{Type: TokenError, Line: l.line, Column: l.column - 1}
 			}
 		} else {
 			l.advance()
@@ -227,21 +272,24 @@ func (l *Lexer) scanNumber() Token {
 
 	// 2. Integer part
 	if l.pos >= len(l.input) {
-		return Token{Type: TokenError, Value: "incomplete number", Line: startLine, Column: startCol}
+		l.err = "incomplete number"
+		return Token{Type: TokenError, Line: startLine, Column: startCol}
 	}
 	firstDigit := l.peek()
 	if !isDigit(firstDigit) {
-		return Token{Type: TokenError, Value: fmt.Sprintf("invalid number: expected digit, got %q", string(firstDigit)), Line: l.line, Column: l.column}
+		l.err = fmt.Sprintf("invalid number: expected digit, got %q", string(firstDigit))
+		return Token{Type: TokenError, Line: l.line, Column: l.column}
 	}
 	l.advance()
 
 	if firstDigit == '0' {
-		// Next digit can't be a digit (e.g. 01 is not allowed in JSON, must be decimal point or exponent or end)
+		// Next digit can't be a digit (e.g. 01 is not allowed in JSON)
 		if isDigit(l.peek()) {
-			return Token{Type: TokenError, Value: "invalid number: leading zero not allowed", Line: l.line, Column: l.column}
+			l.err = "invalid number: leading zero not allowed"
+			return Token{Type: TokenError, Line: l.line, Column: l.column}
 		}
 	} else {
-		// Consume digits
+		// Consume remaining digits
 		for isDigit(l.peek()) {
 			l.advance()
 		}
@@ -251,7 +299,8 @@ func (l *Lexer) scanNumber() Token {
 	if l.peek() == '.' {
 		l.advance() // consume '.'
 		if !isDigit(l.peek()) {
-			return Token{Type: TokenError, Value: fmt.Sprintf("invalid number: expected decimal digit, got %q", string(l.peek())), Line: l.line, Column: l.column}
+			l.err = fmt.Sprintf("invalid number: expected decimal digit, got %q", string(l.peek()))
+			return Token{Type: TokenError, Line: l.line, Column: l.column}
 		}
 		for isDigit(l.peek()) {
 			l.advance()
@@ -266,15 +315,15 @@ func (l *Lexer) scanNumber() Token {
 			l.advance()
 		}
 		if !isDigit(l.peek()) {
-			return Token{Type: TokenError, Value: fmt.Sprintf("invalid number: expected exponent value, got %q", string(l.peek())), Line: l.line, Column: l.column}
+			l.err = fmt.Sprintf("invalid number: expected exponent value, got %q", string(l.peek()))
+			return Token{Type: TokenError, Line: l.line, Column: l.column}
 		}
 		for isDigit(l.peek()) {
 			l.advance()
 		}
 	}
 
-	val := string(l.input[startPos:l.pos])
-	return Token{Type: TokenNumber, Value: val, Line: startLine, Column: startCol}
+	return Token{Type: TokenNumber, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
 }
 
 func (l *Lexer) scanKeyword() Token {
@@ -286,16 +335,17 @@ func (l *Lexer) scanKeyword() Token {
 		l.advance()
 	}
 
-	val := string(l.input[startPos:l.pos])
-	switch val {
+	// Go compiler optimizes `switch string(byteSlice)` to avoid allocation
+	switch string(l.input[startPos:l.pos]) {
 	case "true":
-		return Token{Type: TokenTrue, Value: val, Line: startLine, Column: startCol}
+		return Token{Type: TokenTrue, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
 	case "false":
-		return Token{Type: TokenFalse, Value: val, Line: startLine, Column: startCol}
+		return Token{Type: TokenFalse, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
 	case "null":
-		return Token{Type: TokenNull, Value: val, Line: startLine, Column: startCol}
+		return Token{Type: TokenNull, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
 	default:
-		return Token{Type: TokenError, Value: fmt.Sprintf("unexpected keyword or identifier: %q", val), Line: startLine, Column: startCol}
+		l.err = fmt.Sprintf("unexpected keyword or identifier: %q", string(l.input[startPos:l.pos]))
+		return Token{Type: TokenError, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
 	}
 }
 

@@ -52,7 +52,7 @@ func (p *Parser) Parse() (any, error) {
 	p.peekToken = p.lexer.NextToken()
 
 	if p.currentToken.Type == TokenError {
-		return nil, p.error(p.currentToken.Value)
+		return nil, p.error(p.lexer.err)
 	}
 	if p.currentToken.Type == TokenEOF {
 		return nil, p.error("empty JSON input")
@@ -64,7 +64,7 @@ func (p *Parser) Parse() (any, error) {
 	}
 
 	if p.currentToken.Type == TokenError {
-		return nil, p.error(p.currentToken.Value)
+		return nil, p.error(p.lexer.err)
 	}
 	if p.currentToken.Type != TokenEOF {
 		return nil, p.error(fmt.Sprintf("unexpected token at end of input: %s", p.currentToken.Type))
@@ -85,14 +85,16 @@ func (p *Parser) parseValue() (any, error) {
 		p.nextToken()
 		return nil, nil
 	case TokenNumber:
-		val, err := strconv.ParseFloat(p.currentToken.Value, 64)
+		numStr := p.lexer.TokenValue(p.currentToken)
+		val, err := strconv.ParseFloat(numStr, 64)
 		if err != nil {
 			return nil, p.error(fmt.Sprintf("invalid number format: %s", err.Error()))
 		}
 		p.nextToken()
 		return val, nil
 	case TokenString:
-		val, err := unescapeString(p.currentToken.Value)
+		raw := p.lexer.TokenValue(p.currentToken)
+		val, err := unescapeString(raw)
 		if err != nil {
 			return nil, p.error(fmt.Sprintf("invalid string: %s", err.Error()))
 		}
@@ -103,7 +105,7 @@ func (p *Parser) parseValue() (any, error) {
 	case TokenBracketOpen:
 		return p.parseArray()
 	case TokenError:
-		return nil, p.error(p.currentToken.Value)
+		return nil, p.error(p.lexer.err)
 	default:
 		return nil, p.error(fmt.Sprintf("unexpected token %s", p.currentToken.Type))
 	}
@@ -135,7 +137,7 @@ func (p *Parser) parseArray() ([]any, error) {
 		}
 
 		if p.currentToken.Type == TokenError {
-			return nil, p.error(p.currentToken.Value)
+			return nil, p.error(p.lexer.err)
 		}
 
 		if p.currentToken.Type != TokenComma {
@@ -166,13 +168,13 @@ func (p *Parser) parseObject() (map[string]any, error) {
 
 	for {
 		if p.currentToken.Type == TokenError {
-			return nil, p.error(p.currentToken.Value)
+			return nil, p.error(p.lexer.err)
 		}
 		if p.currentToken.Type != TokenString {
 			return nil, p.error(fmt.Sprintf("expected string key in object, got %s", p.currentToken.Type))
 		}
 
-		rawKey := p.currentToken.Value
+		rawKey := p.lexer.TokenValue(p.currentToken)
 		key, err := unescapeString(rawKey)
 		if err != nil {
 			return nil, p.error(fmt.Sprintf("invalid object key: %s", err.Error()))
@@ -196,7 +198,7 @@ func (p *Parser) parseObject() (map[string]any, error) {
 		}
 
 		if p.currentToken.Type == TokenError {
-			return nil, p.error(p.currentToken.Value)
+			return nil, p.error(p.lexer.err)
 		}
 
 		if p.currentToken.Type != TokenComma {
@@ -213,6 +215,7 @@ func (p *Parser) parseObject() (map[string]any, error) {
 }
 
 // unescapeString decodes escape sequences in raw JSON string token values.
+// Used by the dynamic Parse() path.
 func unescapeString(raw string) (string, error) {
 	var sb strings.Builder
 	sb.Grow(len(raw))

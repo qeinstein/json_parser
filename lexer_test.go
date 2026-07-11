@@ -23,10 +23,13 @@ func TestLexer_BasicTokens(t *testing.T) {
 	for i, exp := range expected {
 		tok := lexer.NextToken()
 		if tok.Type != exp.typ {
-			t.Fatalf("[%d] expected token type %s, got %s (val=%q, error if any=%s)", i, exp.typ, tok.Type, tok.Value, tok.Value)
+			t.Fatalf("[%d] expected token type %s, got %s (val=%q)", i, exp.typ, tok.Type, lexer.TokenValue(tok))
 		}
-		if exp.val != "" && tok.Value != exp.val {
-			t.Fatalf("[%d] expected token value %q, got %q", i, exp.val, tok.Value)
+		if exp.val != "" {
+			got := lexer.TokenValue(tok)
+			if got != exp.val {
+				t.Fatalf("[%d] expected token value %q, got %q", i, exp.val, got)
+			}
 		}
 	}
 }
@@ -64,10 +67,13 @@ func TestLexer_Strings(t *testing.T) {
 		lexer := NewLexer([]byte(tc.input))
 		tok := lexer.NextToken()
 		if tok.Type != tc.expected {
-			t.Errorf("For input %s: expected %s, got %s (val=%q)", tc.input, tc.expected, tok.Type, tok.Value)
+			t.Errorf("For input %s: expected %s, got %s (val=%q)", tc.input, tc.expected, tok.Type, lexer.TokenValue(tok))
 		}
-		if tc.expected == TokenString && tok.Value != tc.val {
-			t.Errorf("For input %s: expected value %q, got %q", tc.input, tc.val, tok.Value)
+		if tc.expected == TokenString {
+			got := lexer.TokenValue(tok)
+			if got != tc.val {
+				t.Errorf("For input %s: expected value %q, got %q", tc.input, tc.val, got)
+			}
 		}
 	}
 }
@@ -97,10 +103,13 @@ func TestLexer_Numbers(t *testing.T) {
 		lexer := NewLexer([]byte(tc.input))
 		tok := lexer.NextToken()
 		if tok.Type != tc.expected {
-			t.Errorf("For input %s: expected %s, got %s (val=%q)", tc.input, tc.expected, tok.Type, tok.Value)
+			t.Errorf("For input %s: expected %s, got %s (val=%q)", tc.input, tc.expected, tok.Type, lexer.TokenValue(tok))
 		}
-		if tc.expected == TokenNumber && tok.Value != tc.val {
-			t.Errorf("For input %s: expected value %q, got %q", tc.input, tc.val, tok.Value)
+		if tc.expected == TokenNumber {
+			got := lexer.TokenValue(tok)
+			if got != tc.val {
+				t.Errorf("For input %s: expected value %q, got %q", tc.input, tc.val, got)
+			}
 		}
 	}
 }
@@ -129,7 +138,7 @@ func TestLexer_Complex(t *testing.T) {
 	for i, typ := range expected {
 		tok := lexer.NextToken()
 		if tok.Type != typ {
-			t.Fatalf("[%d] expected %s, got %s (val=%q, line=%d, col=%d)", i, typ, tok.Type, tok.Value, tok.Line, tok.Column)
+			t.Fatalf("[%d] expected %s, got %s (val=%q, line=%d, col=%d)", i, typ, tok.Type, lexer.TokenValue(tok), tok.Line, tok.Column)
 		}
 	}
 }
