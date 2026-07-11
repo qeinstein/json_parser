@@ -556,5 +556,20 @@ func TestCaseInsensitiveMatchingFallback(t *testing.T) {
 	}
 }
 
+func TestMarshalIndent(t *testing.T) {
+	type Data struct {
+		A int `json:"a"`
+	}
+	d := Data{A: 1}
+	b, err := MarshalIndent(d, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent failed: %v", err)
+	}
+	expected := "{\n  \"a\": 1\n}"
+	if string(b) != expected {
+		t.Errorf("Expected Indent:\n%s\nGot:\n%s", expected, string(b))
+	}
+}
+
 
 

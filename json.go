@@ -1,6 +1,7 @@
 package json_parser
 
 import (
+	"bytes"
 	"json_parser/decoder"
 	"json_parser/encoder"
 	"json_parser/lexer"
@@ -55,4 +56,18 @@ func Valid(data []byte) bool {
 	p := parser.NewParser(l)
 	_, err := p.Parse()
 	return err == nil
+}
+
+// MarshalIndent is like Marshal but applies Indent to format the output.
+func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
+	b, err := encoder.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	err = Indent(&buf, b, prefix, indent)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
