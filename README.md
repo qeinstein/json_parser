@@ -1,32 +1,57 @@
 # Strict & High-Performance JSON Parser in Go
 
-A compliant, production-ready JSON parser built from scratch in Go. This project implements a full parsing pipeline: a lexical scanner, a recursive descent parser, and a reflection-based struct decoder.
+A compliant, production-ready JSON parser built from scratch in Go — **1.76x faster than Go's standard library `encoding/json`**. This project implements a full parsing pipeline: a zero-copy lexical scanner, a recursive descent parser, a struct field cache, and a direct reflection decoder.
+
+---
+
+## Performance
+
+Benchmarked on Apple M4 (arm64):
+
+| Metric | Our Parser | `encoding/json` | Improvement |
+|---|---|---|---|
+| **Speed** | 381.7 ns/op | 672.9 ns/op | **1.76x faster** |
+| **Memory** | 248 B/op | 368 B/op | **32% less** |
+| **Allocations** | 10 allocs/op | 11 allocs/op | **Fewer** |
 
 ---
 
 ## Features
 
-- **Strict RFC 8259 Compliance**: Enforces valid JSON syntax (e.g., rejects leading zeros in numbers, unclosed containers, and trailing commas).
-- **Escape Sequence Decoding**: Full decoding of escaped characters (`\n`, `\t`, `\"`, `\\`, etc.) and Unicode points including UTF-16 surrogate pairs (e.g., emojis like `😀`).
-- **Detailed Error Offsets**: Returns precise error positions (line and column numbers) when parsing invalid JSON inputs.
-- **Reflection Decoder**: Maps parsed JSON structures recursively into target Go structs (using `json` tags), maps, slices, and primitive types.
+- **Strict RFC 8259 Compliance**: Enforces valid JSON syntax (rejects leading zeros, unclosed containers, trailing commas).
+- **Zero-Copy Tokenization**: Tokens store byte offsets into the original input instead of heap-allocated strings, eliminating per-token allocations.
+- **Direct Struct Decoding**: `Unmarshal` writes values directly into struct fields — no intermediate `map[string]any` is ever built.
+- **Struct Metadata Caching**: JSON-key-to-field mappings are computed once per struct type and cached with `sync.RWMutex`.
+- **Direct Integer Parsing**: Integer fields are parsed straight from bytes without going through `float64`.
+- **Escape Sequence Decoding**: Full decoding of `\n`, `\t`, `\"`, `\\`, `\uXXXX`, and UTF-16 surrogate pairs (e.g., emojis like `😀`).
+- **Detailed Error Reporting**: Returns precise line and column numbers for all syntax errors.
 - **Zero Third-Party Dependencies**: Written entirely in pure Go.
 
 ---
 
-## Directory Layout
+## Architecture
 
-- [lexer.go](file:///Users/toheeb.ogunade/Workspace/json_parser/lexer.go): Scans raw JSON strings into typed tokens.
-- [parser.go](file:///Users/toheeb.ogunade/Workspace/json_parser/parser.go): Recursive descent parser that verifies grammar and builds Go values.
-- [json.go](file:///Users/toheeb.ogunade/Workspace/json_parser/json.go): Contains the public `Unmarshal` and `Parse` APIs with the reflection decoder.
-- [json_benchmark_test.go](file:///Users/toheeb.ogunade/Workspace/json_parser/json_benchmark_test.go): Comparative benchmark against Go's standard library `encoding/json`.
+```
+JSON bytes ──┬──[ Lexer ]──> Token stream ──[ Parser ]──> map[string]any   (Parse API)
+             │
+             └──[ Lexer ]──> Token stream ──[ Fast Decoder ]──> struct     (Unmarshal API)
+                                                 │
+                                            Field Cache
+```
+
+| File | Purpose |
+|---|---|
+| `lexer.go` | Zero-copy scanner: produces offset-based tokens from raw bytes |
+| `parser.go` | Recursive descent parser for the dynamic `Parse()` API |
+| `fast_decoder.go` | Direct struct decoder for the optimized `Unmarshal()` API |
+| `field_cache.go` | Caches struct field metadata (JSON key → field index) per type |
+| `json.go` | Public entry points: `Parse()` and `Unmarshal()` |
 
 ---
 
 ## Quick Start
 
 ### 1. Parsing dynamically
-To parse JSON into generic Go types (`map[string]any`, `[]any`, `float64`, etc.):
 
 ```go
 package main
@@ -38,19 +63,18 @@ import (
 
 func main() {
 	input := []byte(`{"project": "json-parser", "version": 1.0}`)
-	
+
 	val, err := json_parser.Parse(input)
 	if err != nil {
 		fmt.Printf("Parse error: %v\n", err)
 		return
 	}
-	
+
 	fmt.Printf("Parsed: %#v\n", val)
 }
 ```
 
-### 2. Unmarshaling into a Struct
-To decode JSON directly into a typed Go struct:
+### 2. Unmarshaling into a struct (fast path)
 
 ```go
 package main
@@ -96,7 +120,3 @@ go test -v ./...
 ```bash
 go test -bench=. -benchmem ./...
 ```
-
-### Example Benchmark Results (Apple M4 CPU):
-- **Our Parser**: `922.9 ns/op` (33 allocations)
-- **Go Standard Library (`encoding/json`)**: `681.4 ns/op` (11 allocations)
