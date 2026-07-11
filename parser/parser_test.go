@@ -1,6 +1,7 @@
-package json_parser
+package parser
 
 import (
+	"json_parser/lexer"
 	"reflect"
 	"strings"
 	"testing"
@@ -40,9 +41,9 @@ func TestParser_Valid(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		lexer := NewLexer([]byte(tc.input))
-		parser := NewParser(lexer)
-		got, err := parser.Parse()
+		l := lexer.NewLexer([]byte(tc.input))
+		p := NewParser(l)
+		got, err := p.Parse()
 		if err != nil {
 			t.Errorf("Failed to parse %q: %v", tc.input, err)
 			continue
@@ -55,7 +56,7 @@ func TestParser_Valid(t *testing.T) {
 
 func TestParser_Invalid(t *testing.T) {
 	tests := []struct {
-		input string
+		input  string
 		errMsg string
 	}{
 		{`[1, 2, ]`, "trailing comma in array is not allowed"},
@@ -69,15 +70,14 @@ func TestParser_Invalid(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		lexer := NewLexer([]byte(tc.input))
-		parser := NewParser(lexer)
-		_, err := parser.Parse()
+		l := lexer.NewLexer([]byte(tc.input))
+		p := NewParser(l)
+		_, err := p.Parse()
 		if err == nil {
 			t.Errorf("Expected parse error for invalid input %q, but it succeeded", tc.input)
 			continue
 		}
 		if tc.errMsg != "" {
-			// Verify that the error message contains the expected message snippet
 			if !strings.Contains(err.Error(), tc.errMsg) {
 				t.Errorf("For input %q: expected error message containing %q, got %q", tc.input, tc.errMsg, err.Error())
 			}

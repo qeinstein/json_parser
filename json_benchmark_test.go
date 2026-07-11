@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- Benchmark Types ---
+// Benchmark types
 
 type Address struct {
 	Street  string `json:"street"`
@@ -34,7 +34,7 @@ type APIResponse struct {
 	Data    []Employee `json:"data"`
 }
 
-// --- 1. Small Object (simple struct, 4 fields) ---
+// Small object: simple struct, 4 fields
 
 func BenchmarkSmallObject(b *testing.B) {
 	input := []byte(`{
@@ -61,7 +61,7 @@ func BenchmarkSmallObject(b *testing.B) {
 	})
 }
 
-// --- 2. Medium Object (nested struct, 9+ fields) ---
+// Medium object: nested struct, 9+ fields
 
 func BenchmarkMediumObject(b *testing.B) {
 	input := []byte(`{
@@ -99,7 +99,7 @@ func BenchmarkMediumObject(b *testing.B) {
 	})
 }
 
-// --- 3. Large Array of Objects ---
+// Large array of objects
 
 func BenchmarkLargeArray(b *testing.B) {
 	input := []byte(`{
@@ -132,7 +132,7 @@ func BenchmarkLargeArray(b *testing.B) {
 	})
 }
 
-// --- 4. Primitives Only (numbers, bools, null) ---
+// Primitives only: numbers, bools, null
 
 func BenchmarkPrimitivesOnly(b *testing.B) {
 	type Metrics struct {
@@ -170,7 +170,7 @@ func BenchmarkPrimitivesOnly(b *testing.B) {
 	})
 }
 
-// --- 5. String Heavy (long strings, many string fields) ---
+// String heavy: long strings, many string fields
 
 func BenchmarkStringHeavy(b *testing.B) {
 	type Article struct {
@@ -208,7 +208,7 @@ func BenchmarkStringHeavy(b *testing.B) {
 	})
 }
 
-// --- 6. Dynamic Parse (into map[string]any) ---
+// Dynamic parse into map[string]any
 
 func BenchmarkDynamicParse(b *testing.B) {
 	input := []byte(`{

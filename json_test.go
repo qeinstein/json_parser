@@ -1,7 +1,10 @@
 package json_parser
 
 import (
+	"bytes"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -91,3 +94,245 @@ func TestUnmarshal_PrimitivesAndMaps(t *testing.T) {
 		t.Errorf("Map got: %v", valMap)
 	}
 }
+
+// CustomMarshaler/Unmarshaler types for testing
+type CustomText struct {
+	Value string
+}
+
+func (c CustomText) MarshalJSON() ([]byte, error) {
+	return []byte(`"custom:` + c.Value + `"`), nil
+}
+
+func (c *CustomText) UnmarshalJSON(data []byte) error {
+	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+		return errors.New("invalid custom text format")
+	}
+	val := string(data[1 : len(data)-1])
+	if strings.HasPrefix(val, "custom:") {
+		c.Value = val[len("custom:"):]
+	} else {
+		c.Value = val
+	}
+	return nil
+}
+
+func TestCustomMarshalerAndUnmarshaler(t *testing.T) {
+	// Test Marshaling
+	c := CustomText{Value: "hello"}
+	data, err := Marshal(c)
+	if err != nil {
+		t.Fatalf("Marshal CustomText failed: %v", err)
+	}
+	if string(data) != `"custom:hello"` {
+		t.Errorf("Expected `\"custom:hello\"`, got %q", string(data))
+	}
+
+	// Test Unmarshaling
+	var c2 CustomText
+	if err := Unmarshal([]byte(`"custom:world"`), &c2); err != nil {
+		t.Fatalf("Unmarshal CustomText failed: %v", err)
+	}
+	if c2.Value != "world" {
+		t.Errorf("Expected `world`, got %q", c2.Value)
+	}
+}
+
+// Structs for Embedded struct testing
+type InnerEmbedded struct {
+	FieldA string `json:"field_a"`
+	FieldB int    `json:"field_b"`
+}
+
+type OuterStruct struct {
+	InnerEmbedded
+	FieldC bool `json:"field_c"`
+}
+
+func TestEmbeddedStructs(t *testing.T) {
+	input := `{
+		"field_a": "embedded-value",
+		"field_b": 999,
+		"field_c": true
+	}`
+
+	var out OuterStruct
+	if err := Unmarshal([]byte(input), &out); err != nil {
+		t.Fatalf("Unmarshal EmbeddedStruct failed: %v", err)
+	}
+
+	if out.FieldA != "embedded-value" {
+		t.Errorf("Expected out.FieldA to be 'embedded-value', got %q", out.FieldA)
+	}
+	if out.FieldB != 999 {
+		t.Errorf("Expected out.FieldB to be 999, got %d", out.FieldB)
+	}
+	if !out.FieldC {
+		t.Errorf("Expected out.FieldC to be true, got false")
+	}
+
+	// Test Marshalling embedded struct
+	data, err := Marshal(out)
+	if err != nil {
+		t.Fatalf("Marshal EmbeddedStruct failed: %v", err)
+	}
+	// Check that fields from inner embedded struct are flattened in marshaled JSON
+	expectedJSON := `{"field_a":"embedded-value","field_b":999,"field_c":true}`
+	if string(data) != expectedJSON {
+		t.Errorf("Expected JSON %q, got %q", expectedJSON, string(data))
+	}
+}
+
+func TestRawMessage(t *testing.T) {
+	type MessageWithRaw struct {
+		ID      int        `json:"id"`
+		Payload RawMessage `json:"payload"`
+	}
+
+	input := `{"id":123,"payload":{"nested_key":"nested_value"}}`
+	var m MessageWithRaw
+	if err := Unmarshal([]byte(input), &m); err != nil {
+		t.Fatalf("Unmarshal RawMessage failed: %v", err)
+	}
+
+	if m.ID != 123 {
+		t.Errorf("Expected ID 123, got %d", m.ID)
+	}
+	expectedPayload := `{"nested_key":"nested_value"}`
+	if string(m.Payload) != expectedPayload {
+		t.Errorf("Expected Payload %q, got %q", expectedPayload, string(m.Payload))
+	}
+
+	// Test Marshalling
+	data, err := Marshal(m)
+	if err != nil {
+		t.Fatalf("Marshal RawMessage failed: %v", err)
+	}
+	if string(data) != input {
+		t.Errorf("Expected JSON %q, got %q", input, string(data))
+	}
+}
+
+func TestNumber(t *testing.T) {
+	type StructWithNumber struct {
+		Value Number `json:"val"`
+	}
+
+	input := `{"val":1.23456789e+10}`
+	var s StructWithNumber
+	if err := Unmarshal([]byte(input), &s); err != nil {
+		t.Fatalf("Unmarshal Number failed: %v", err)
+	}
+
+	if s.Value.String() != "1.23456789e+10" {
+		t.Errorf("Expected String '1.23456789e+10', got %q", s.Value.String())
+	}
+
+	f, err := s.Value.Float64()
+	if err != nil {
+		t.Fatalf("Float64 failed: %v", err)
+	}
+	if f != 1.23456789e+10 {
+		t.Errorf("Expected float 1.23456789e+10, got %f", f)
+	}
+
+	// Test Marshalling Number
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatalf("Marshal Number failed: %v", err)
+	}
+	if string(data) != input {
+		t.Errorf("Expected JSON %q, got %q", input, string(data))
+	}
+}
+
+func TestValid(t *testing.T) {
+	if !Valid([]byte(`{"a": 1}`)) {
+		t.Errorf("Expected `{\"a\": 1}` to be valid JSON")
+	}
+	if Valid([]byte(`{"a": 1,}`)) {
+		t.Errorf("Expected `{\"a\": 1,}` to be invalid JSON")
+	}
+}
+
+func TestStructTagOptions(t *testing.T) {
+	type TaggedStruct struct {
+		OmitMe   int    `json:"omit_me,omitempty"`
+		KeepMe   int    `json:"keep_me,omitempty"`
+		StringVal int   `json:"string_val,string"`
+		Ignored  string `json:"-"`
+	}
+
+	s := TaggedStruct{
+		KeepMe:   456,
+		StringVal: 789,
+		Ignored:  "hide-me",
+	}
+
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatalf("Marshal TaggedStruct failed: %v", err)
+	}
+
+	expectedJSON := `{"keep_me":456,"string_val":"789"}`
+	if string(data) != expectedJSON {
+		t.Errorf("Expected JSON %q, got %q", expectedJSON, string(data))
+	}
+}
+
+func TestStreamingEncoderDecoder(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf)
+
+	type Data struct {
+		Name string `json:"name"`
+		Val  int    `json:"val"`
+	}
+
+	d1 := Data{Name: "first", Val: 10}
+	d2 := Data{Name: "second", Val: 20}
+
+	if err := enc.Encode(d1); err != nil {
+		t.Fatalf("Encode d1 failed: %v", err)
+	}
+	if err := enc.Encode(d2); err != nil {
+		t.Fatalf("Encode d2 failed: %v", err)
+	}
+
+	dec := NewDecoder(&buf)
+	var out1, out2 Data
+
+	if err := dec.Decode(&out1); err != nil {
+		t.Fatalf("Decode out1 failed: %v", err)
+	}
+	if err := dec.Decode(&out2); err != nil {
+		t.Fatalf("Decode out2 failed: %v", err)
+	}
+
+	if out1 != d1 || out2 != d2 {
+		t.Errorf("Streaming decode got mismatched data: out1=%+v, out2=%+v", out1, out2)
+	}
+}
+
+func TestMaxDepthLimit(t *testing.T) {
+	// 1001 levels of nested arrays
+	input := strings.Repeat("[", 1001) + strings.Repeat("]", 1001)
+	var v any
+	err := Unmarshal([]byte(input), &v)
+	if err == nil {
+		t.Fatal("Expected error for deeply nested JSON exceeding 1000 limit, but succeeded")
+	}
+	if !strings.Contains(err.Error(), "exceeded max depth limit") {
+		t.Errorf("Expected 'exceeded max depth limit' error message, got: %v", err)
+	}
+
+	// Dynamic Parse path check
+	_, err = Parse([]byte(input))
+	if err == nil {
+		t.Fatal("Expected error for Parse with deeply nested JSON exceeding 1000 limit, but succeeded")
+	}
+	if !strings.Contains(err.Error(), "exceeded max depth limit") {
+		t.Errorf("Expected 'exceeded max depth limit' error message, got: %v", err)
+	}
+}
+

@@ -1,4 +1,4 @@
-package json_parser
+package lexer
 
 import (
 	"fmt"
@@ -74,32 +74,37 @@ func (t Token) String() string {
 
 // Lexer converts a raw JSON byte slice into a stream of tokens.
 type Lexer struct {
-	input  []byte
-	pos    int    // current character offset in input
-	line   int    // current line number (1-based)
-	column int    // current column number (1-based)
-	err    string // error message for the most recent TokenError
+	Input  []byte // Raw JSON input
+	Pos    int    // Current character offset in input
+	Line   int    // Current line number (1-based)
+	Column int    // Current column number (1-based)
+	errMsg string // Error message for the most recent TokenError
 }
 
 // NewLexer creates and initializes a Lexer.
 func NewLexer(input []byte) *Lexer {
 	return &Lexer{
-		input:  input,
-		line:   1,
-		column: 1,
+		Input:  input,
+		Line:   1,
+		Column: 1,
 	}
+}
+
+// Error returns the error message for the most recent TokenError.
+func (l *Lexer) Error() string {
+	return l.errMsg
 }
 
 // TokenValue returns the string value of a token. This allocates a new string.
 // For error tokens, returns the error message.
 func (l *Lexer) TokenValue(t Token) string {
 	if t.Type == TokenError {
-		return l.err
+		return l.errMsg
 	}
 	if t.Start >= t.End {
 		return ""
 	}
-	return string(l.input[t.Start:t.End])
+	return string(l.Input[t.Start:t.End])
 }
 
 // TokenBytes returns the raw byte slice for a token without allocation.
@@ -108,31 +113,31 @@ func (l *Lexer) TokenBytes(t Token) []byte {
 	if t.Start >= t.End {
 		return nil
 	}
-	return l.input[t.Start:t.End]
+	return l.Input[t.Start:t.End]
 }
 
 // peek returns the byte at the current position without consuming it.
 // Returns 0 if end of input is reached.
 func (l *Lexer) peek() byte {
-	if l.pos >= len(l.input) {
+	if l.Pos >= len(l.Input) {
 		return 0
 	}
-	return l.input[l.pos]
+	return l.Input[l.Pos]
 }
 
 // advance consumes and returns the byte at the current position.
 // Returns 0 if end of input is reached.
 func (l *Lexer) advance() byte {
-	if l.pos >= len(l.input) {
+	if l.Pos >= len(l.Input) {
 		return 0
 	}
-	b := l.input[l.pos]
-	l.pos++
+	b := l.Input[l.Pos]
+	l.Pos++
 	if b == '\n' {
-		l.line++
-		l.column = 1
+		l.Line++
+		l.Column = 1
 	} else {
-		l.column++
+		l.Column++
 	}
 	return b
 }
@@ -141,39 +146,39 @@ func (l *Lexer) advance() byte {
 func (l *Lexer) NextToken() Token {
 	l.skipWhitespace()
 
-	if l.pos >= len(l.input) {
-		return Token{Type: TokenEOF, Line: l.line, Column: l.column}
+	if l.Pos >= len(l.Input) {
+		return Token{Type: TokenEOF, Line: l.Line, Column: l.Column}
 	}
 
-	startLine := l.line
-	startCol := l.column
+	startLine := l.Line
+	startCol := l.Column
 	b := l.peek()
 
 	switch b {
 	case '{':
-		start := l.pos
+		start := l.Pos
 		l.advance()
-		return Token{Type: TokenBraceOpen, Start: start, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenBraceOpen, Start: start, End: l.Pos, Line: startLine, Column: startCol}
 	case '}':
-		start := l.pos
+		start := l.Pos
 		l.advance()
-		return Token{Type: TokenBraceClose, Start: start, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenBraceClose, Start: start, End: l.Pos, Line: startLine, Column: startCol}
 	case '[':
-		start := l.pos
+		start := l.Pos
 		l.advance()
-		return Token{Type: TokenBracketOpen, Start: start, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenBracketOpen, Start: start, End: l.Pos, Line: startLine, Column: startCol}
 	case ']':
-		start := l.pos
+		start := l.Pos
 		l.advance()
-		return Token{Type: TokenBracketClose, Start: start, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenBracketClose, Start: start, End: l.Pos, Line: startLine, Column: startCol}
 	case ':':
-		start := l.pos
+		start := l.Pos
 		l.advance()
-		return Token{Type: TokenColon, Start: start, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenColon, Start: start, End: l.Pos, Line: startLine, Column: startCol}
 	case ',':
-		start := l.pos
+		start := l.Pos
 		l.advance()
-		return Token{Type: TokenComma, Start: start, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenComma, Start: start, End: l.Pos, Line: startLine, Column: startCol}
 	case '"':
 		return l.scanString()
 	default:
@@ -184,21 +189,21 @@ func (l *Lexer) NextToken() Token {
 			return l.scanKeyword()
 		}
 		l.advance()
-		l.err = fmt.Sprintf("unexpected character: %q", string(b))
+		l.errMsg = fmt.Sprintf("unexpected character: %q", string(b))
 		return Token{Type: TokenError, Line: startLine, Column: startCol}
 	}
 }
 
 func (l *Lexer) skipWhitespace() {
-	for l.pos < len(l.input) {
-		b := l.input[l.pos]
+	for l.Pos < len(l.Input) {
+		b := l.Input[l.Pos]
 		if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
-			l.pos++
+			l.Pos++
 			if b == '\n' {
-				l.line++
-				l.column = 1
+				l.Line++
+				l.Column = 1
 			} else {
-				l.column++
+				l.Column++
 			}
 		} else {
 			break
@@ -207,31 +212,31 @@ func (l *Lexer) skipWhitespace() {
 }
 
 func (l *Lexer) scanString() Token {
-	startLine := l.line
-	startCol := l.column
+	startLine := l.Line
+	startCol := l.Column
 	l.advance() // consume opening '"'
 
-	contentStart := l.pos
+	contentStart := l.Pos
 	for {
-		if l.pos >= len(l.input) {
-			l.err = "unterminated string literal"
+		if l.Pos >= len(l.Input) {
+			l.errMsg = "unterminated string literal"
 			return Token{Type: TokenError, Line: startLine, Column: startCol}
 		}
 		b := l.peek()
 		if b < 0x20 {
-			l.err = "invalid control character in string literal"
-			return Token{Type: TokenError, Line: l.line, Column: l.column}
+			l.errMsg = "invalid control character in string literal"
+			return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 		}
 		if b == '"' {
-			contentEnd := l.pos
+			contentEnd := l.Pos
 			l.advance() // consume closing '"'
 			return Token{Type: TokenString, Start: contentStart, End: contentEnd, Line: startLine, Column: startCol}
 		}
 		if b == '\\' {
 			l.advance() // consume '\\'
-			if l.pos >= len(l.input) {
-				l.err = "unterminated escape sequence"
-				return Token{Type: TokenError, Line: l.line, Column: l.column}
+			if l.Pos >= len(l.Input) {
+				l.errMsg = "unterminated escape sequence"
+				return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 			}
 			escapeChar := l.advance()
 			switch escapeChar {
@@ -240,19 +245,19 @@ func (l *Lexer) scanString() Token {
 			case 'u':
 				// Must have exactly 4 hex digits after '\u'
 				for i := 0; i < 4; i++ {
-					if l.pos >= len(l.input) {
-						l.err = "unterminated unicode escape sequence"
-						return Token{Type: TokenError, Line: l.line, Column: l.column}
+					if l.Pos >= len(l.Input) {
+						l.errMsg = "unterminated unicode escape sequence"
+						return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 					}
 					hexDigit := l.advance()
 					if !isHexDigit(hexDigit) {
-						l.err = "invalid unicode escape sequence"
-						return Token{Type: TokenError, Line: l.line, Column: l.column}
+						l.errMsg = "invalid unicode escape sequence"
+						return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 					}
 				}
 			default:
-				l.err = fmt.Sprintf("invalid escape character: %q", string(escapeChar))
-				return Token{Type: TokenError, Line: l.line, Column: l.column - 1}
+				l.errMsg = fmt.Sprintf("invalid escape character: %q", string(escapeChar))
+				return Token{Type: TokenError, Line: l.Line, Column: l.Column - 1}
 			}
 		} else {
 			l.advance()
@@ -261,9 +266,9 @@ func (l *Lexer) scanString() Token {
 }
 
 func (l *Lexer) scanNumber() Token {
-	startLine := l.line
-	startCol := l.column
-	startPos := l.pos
+	startLine := l.Line
+	startCol := l.Column
+	startPos := l.Pos
 
 	// 1. Optional negative sign
 	if l.peek() == '-' {
@@ -271,22 +276,22 @@ func (l *Lexer) scanNumber() Token {
 	}
 
 	// 2. Integer part
-	if l.pos >= len(l.input) {
-		l.err = "incomplete number"
+	if l.Pos >= len(l.Input) {
+		l.errMsg = "incomplete number"
 		return Token{Type: TokenError, Line: startLine, Column: startCol}
 	}
 	firstDigit := l.peek()
 	if !isDigit(firstDigit) {
-		l.err = fmt.Sprintf("invalid number: expected digit, got %q", string(firstDigit))
-		return Token{Type: TokenError, Line: l.line, Column: l.column}
+		l.errMsg = fmt.Sprintf("invalid number: expected digit, got %q", string(firstDigit))
+		return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 	}
 	l.advance()
 
 	if firstDigit == '0' {
 		// Next digit can't be a digit (e.g. 01 is not allowed in JSON)
 		if isDigit(l.peek()) {
-			l.err = "invalid number: leading zero not allowed"
-			return Token{Type: TokenError, Line: l.line, Column: l.column}
+			l.errMsg = "invalid number: leading zero not allowed"
+			return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 		}
 	} else {
 		// Consume remaining digits
@@ -299,8 +304,8 @@ func (l *Lexer) scanNumber() Token {
 	if l.peek() == '.' {
 		l.advance() // consume '.'
 		if !isDigit(l.peek()) {
-			l.err = fmt.Sprintf("invalid number: expected decimal digit, got %q", string(l.peek()))
-			return Token{Type: TokenError, Line: l.line, Column: l.column}
+			l.errMsg = fmt.Sprintf("invalid number: expected decimal digit, got %q", string(l.peek()))
+			return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 		}
 		for isDigit(l.peek()) {
 			l.advance()
@@ -315,37 +320,37 @@ func (l *Lexer) scanNumber() Token {
 			l.advance()
 		}
 		if !isDigit(l.peek()) {
-			l.err = fmt.Sprintf("invalid number: expected exponent value, got %q", string(l.peek()))
-			return Token{Type: TokenError, Line: l.line, Column: l.column}
+			l.errMsg = fmt.Sprintf("invalid number: expected exponent value, got %q", string(l.peek()))
+			return Token{Type: TokenError, Line: l.Line, Column: l.Column}
 		}
 		for isDigit(l.peek()) {
 			l.advance()
 		}
 	}
 
-	return Token{Type: TokenNumber, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
+	return Token{Type: TokenNumber, Start: startPos, End: l.Pos, Line: startLine, Column: startCol}
 }
 
 func (l *Lexer) scanKeyword() Token {
-	startLine := l.line
-	startCol := l.column
-	startPos := l.pos
+	startLine := l.Line
+	startCol := l.Column
+	startPos := l.Pos
 
 	for isLetter(l.peek()) {
 		l.advance()
 	}
 
 	// Go compiler optimizes `switch string(byteSlice)` to avoid allocation
-	switch string(l.input[startPos:l.pos]) {
+	switch string(l.Input[startPos:l.Pos]) {
 	case "true":
-		return Token{Type: TokenTrue, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenTrue, Start: startPos, End: l.Pos, Line: startLine, Column: startCol}
 	case "false":
-		return Token{Type: TokenFalse, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenFalse, Start: startPos, End: l.Pos, Line: startLine, Column: startCol}
 	case "null":
-		return Token{Type: TokenNull, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
+		return Token{Type: TokenNull, Start: startPos, End: l.Pos, Line: startLine, Column: startCol}
 	default:
-		l.err = fmt.Sprintf("unexpected keyword or identifier: %q", string(l.input[startPos:l.pos]))
-		return Token{Type: TokenError, Start: startPos, End: l.pos, Line: startLine, Column: startCol}
+		l.errMsg = fmt.Sprintf("unexpected keyword or identifier: %q", string(l.Input[startPos:l.Pos]))
+		return Token{Type: TokenError, Start: startPos, End: l.Pos, Line: startLine, Column: startCol}
 	}
 }
 

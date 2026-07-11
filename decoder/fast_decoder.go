@@ -1,42 +1,55 @@
-package json_parser
+package decoder
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"json_parser/lexer"
+	"json_parser/types"
 	"reflect"
 	"strconv"
 	"strings"
 	"unicode/utf16"
 )
 
-// directUnmarshal is the fast path: it scans tokens and writes directly into the
-// target struct/slice/map without building an intermediate map[string]any.
-func directUnmarshal(data []byte, v any) error {
+// ParseError records a parsing error with positional information.
+type ParseError struct {
+	Message string
+	Line    int
+	Column  int
+}
+
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("parse error at line %d, column %d: %s", e.Line, e.Column, e.Message)
+}
+
+// Unmarshal parses the JSON-encoded data and stores the result in the value pointed to by v.
+func Unmarshal(data []byte, v any) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return errors.New("unmarshal target must be a non-nil pointer")
 	}
 
-	l := &Lexer{input: data, line: 1, column: 1}
+	l := lexer.NewLexer(data)
 	tok := l.NextToken()
 
-	if tok.Type == TokenError {
-		return &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+	if tok.Type == lexer.TokenError {
+		return &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 	}
-	if tok.Type == TokenEOF {
+	if tok.Type == lexer.TokenEOF {
 		return &ParseError{Message: "empty JSON input", Line: tok.Line, Column: tok.Column}
 	}
 
-	next, err := directDecode(l, tok, rv.Elem())
+	next, err := directDecode(l, tok, rv.Elem(), 0)
 	if err != nil {
 		return err
 	}
 
-	if next.Type == TokenError {
-		return &ParseError{Message: l.err, Line: next.Line, Column: next.Column}
+	if next.Type == lexer.TokenError {
+		return &ParseError{Message: l.Error(), Line: next.Line, Column: next.Column}
 	}
-	if next.Type != TokenEOF {
+	if next.Type != lexer.TokenEOF {
 		return &ParseError{
 			Message: fmt.Sprintf("unexpected token at end of input: %s", next.Type),
 			Line:    next.Line, Column: next.Column,
@@ -48,7 +61,30 @@ func directUnmarshal(data []byte, v any) error {
 
 // directDecode decodes one JSON value starting at tok into dest.
 // Returns the next unconsumed token.
-func directDecode(l *Lexer, tok Token, dest reflect.Value) (Token, error) {
+func directDecode(l *lexer.Lexer, tok lexer.Token, dest reflect.Value, depth int) (lexer.Token, error) {
+	if depth > 1000 {
+		return tok, &ParseError{Message: "exceeded max depth limit", Line: tok.Line, Column: tok.Column}
+	}
+	// Check for Unmarshaler interface before dereferencing pointers
+	if dest.CanInterface() {
+		if u, ok := dest.Interface().(types.Unmarshaler); ok {
+			raw, next, err := extractRawJSON(l, tok)
+			if err != nil {
+				return next, err
+			}
+			return next, u.UnmarshalJSON(raw)
+		}
+	}
+	if dest.CanAddr() {
+		if u, ok := dest.Addr().Interface().(types.Unmarshaler); ok {
+			raw, next, err := extractRawJSON(l, tok)
+			if err != nil {
+				return next, err
+			}
+			return next, u.UnmarshalJSON(raw)
+		}
+	}
+
 	// Dereference pointers, allocating if nil
 	for dest.Kind() == reflect.Pointer {
 		if dest.IsNil() {
@@ -59,7 +95,7 @@ func directDecode(l *Lexer, tok Token, dest reflect.Value) (Token, error) {
 
 	// If dest is interface{}, decode to a generic Go value
 	if dest.Kind() == reflect.Interface {
-		val, next, err := decodeToAny(l, tok)
+		val, next, err := decodeToAny(l, tok, depth+1)
 		if err != nil {
 			return next, err
 		}
@@ -72,48 +108,48 @@ func directDecode(l *Lexer, tok Token, dest reflect.Value) (Token, error) {
 	}
 
 	switch tok.Type {
-	case TokenNull:
+	case lexer.TokenNull:
 		dest.Set(reflect.Zero(dest.Type()))
 		return l.NextToken(), nil
 
-	case TokenTrue:
+	case lexer.TokenTrue:
 		if dest.Kind() == reflect.Bool {
 			dest.SetBool(true)
 		}
 		return l.NextToken(), nil
 
-	case TokenFalse:
+	case lexer.TokenFalse:
 		if dest.Kind() == reflect.Bool {
 			dest.SetBool(false)
 		}
 		return l.NextToken(), nil
 
-	case TokenString:
+	case lexer.TokenString:
 		if dest.Kind() == reflect.String {
-			dest.SetString(unescapeTokenString(l.input, tok))
+			dest.SetString(unescapeTokenString(l.Input, tok))
 		}
 		return l.NextToken(), nil
 
-	case TokenNumber:
+	case lexer.TokenNumber:
 		return directDecodeNumber(l, tok, dest)
 
-	case TokenBraceOpen:
+	case lexer.TokenBraceOpen:
 		if dest.Kind() == reflect.Struct {
-			return directDecodeObject(l, dest)
+			return directDecodeObject(l, dest, depth+1)
 		}
 		if dest.Kind() == reflect.Map {
-			return directDecodeMap(l, dest)
+			return directDecodeMap(l, dest, depth+1)
 		}
-		return skipObject(l)
+		return skipObject(l, depth+1)
 
-	case TokenBracketOpen:
+	case lexer.TokenBracketOpen:
 		if dest.Kind() == reflect.Slice {
-			return directDecodeArray(l, dest)
+			return directDecodeArray(l, dest, depth+1)
 		}
-		return skipArray(l)
+		return skipArray(l, depth+1)
 
-	case TokenError:
-		return tok, &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+	case lexer.TokenError:
+		return tok, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 
 	default:
 		return tok, &ParseError{
@@ -125,8 +161,8 @@ func directDecode(l *Lexer, tok Token, dest reflect.Value) (Token, error) {
 
 // directDecodeNumber parses a number token directly into the destination field
 // using the most efficient conversion for the target type.
-func directDecodeNumber(l *Lexer, tok Token, dest reflect.Value) (Token, error) {
-	raw := l.input[tok.Start:tok.End]
+func directDecodeNumber(l *lexer.Lexer, tok lexer.Token, dest reflect.Value) (lexer.Token, error) {
+	raw := l.Input[tok.Start:tok.End]
 	next := l.NextToken()
 
 	switch dest.Kind() {
@@ -164,6 +200,10 @@ func directDecodeNumber(l *Lexer, tok Token, dest reflect.Value) (Token, error) 
 		dest.SetFloat(f)
 		return next, nil
 
+	case reflect.String:
+		dest.SetString(string(raw))
+		return next, nil
+
 	default:
 		// Unsupported target type for number, skip
 		return next, nil
@@ -171,21 +211,21 @@ func directDecodeNumber(l *Lexer, tok Token, dest reflect.Value) (Token, error) 
 }
 
 // directDecodeObject reads a JSON object and writes key-value pairs directly into struct fields.
-func directDecodeObject(l *Lexer, dest reflect.Value) (Token, error) {
+func directDecodeObject(l *lexer.Lexer, dest reflect.Value, depth int) (lexer.Token, error) {
 	// '{' was already identified; consume next token
 	tok := l.NextToken()
 
-	if tok.Type == TokenBraceClose {
+	if tok.Type == lexer.TokenBraceClose {
 		return l.NextToken(), nil // empty object
 	}
 
-	meta := getStructMeta(dest.Type())
+	meta := GetStructMeta(dest.Type())
 
 	for {
-		if tok.Type == TokenError {
-			return tok, &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+		if tok.Type == lexer.TokenError {
+			return tok, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 		}
-		if tok.Type != TokenString {
+		if tok.Type != lexer.TokenString {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected string key in object, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -194,18 +234,18 @@ func directDecodeObject(l *Lexer, dest reflect.Value) (Token, error) {
 
 		// Match key to struct field using zero-copy byte comparison.
 		// Go compiler optimizes map[string] lookup with string([]byte) to avoid allocation.
-		keyBytes := l.input[tok.Start:tok.End]
-		fieldIdx, found := meta.byKey[string(keyBytes)]
+		keyBytes := l.Input[tok.Start:tok.End]
+		metaIdx, found := meta.ByKey[string(keyBytes)]
 
 		// If the key has escape sequences, the raw bytes won't match.
 		// Fallback: unescape and try again.
 		if !found && bytes.IndexByte(keyBytes, '\\') != -1 {
-			unescaped := unescapeTokenString(l.input, tok)
-			fieldIdx, found = meta.byKey[unescaped]
+			unescaped := unescapeTokenString(l.Input, tok)
+			metaIdx, found = meta.ByKey[unescaped]
 		}
 
 		tok = l.NextToken() // expect ':'
-		if tok.Type != TokenColon {
+		if tok.Type != lexer.TokenColon {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected ':' after object key, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -215,30 +255,31 @@ func directDecodeObject(l *Lexer, dest reflect.Value) (Token, error) {
 		tok = l.NextToken() // value token
 
 		if found {
-			// Decode value directly into the struct field
+			// Decode value directly into the struct field using index path
+			field := FieldByIndex(dest, meta.Fields[metaIdx].Index)
 			var err error
-			tok, err = directDecode(l, tok, dest.Field(fieldIdx))
+			tok, err = directDecode(l, tok, field, depth+1)
 			if err != nil {
 				return tok, err
 			}
 		} else {
 			// Unknown field: skip the value entirely (no allocations)
 			var err error
-			tok, err = skipValue(l, tok)
+			tok, err = skipValue(l, tok, depth+1)
 			if err != nil {
 				return tok, err
 			}
 		}
 
-		if tok.Type == TokenBraceClose {
+		if tok.Type == lexer.TokenBraceClose {
 			return l.NextToken(), nil
 		}
 
-		if tok.Type == TokenError {
-			return tok, &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+		if tok.Type == lexer.TokenError {
+			return tok, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 		}
 
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected ',' or '}' after object value, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -247,7 +288,7 @@ func directDecodeObject(l *Lexer, dest reflect.Value) (Token, error) {
 
 		tok = l.NextToken() // next key
 
-		if tok.Type == TokenBraceClose {
+		if tok.Type == lexer.TokenBraceClose {
 			return tok, &ParseError{
 				Message: "trailing comma in object is not allowed",
 				Line:    tok.Line, Column: tok.Column,
@@ -257,31 +298,31 @@ func directDecodeObject(l *Lexer, dest reflect.Value) (Token, error) {
 }
 
 // directDecodeMap reads a JSON object into a map[string]V.
-func directDecodeMap(l *Lexer, dest reflect.Value) (Token, error) {
+func directDecodeMap(l *lexer.Lexer, dest reflect.Value, depth int) (lexer.Token, error) {
 	tok := l.NextToken()
 
 	if dest.IsNil() {
 		dest.Set(reflect.MakeMap(dest.Type()))
 	}
 
-	if tok.Type == TokenBraceClose {
+	if tok.Type == lexer.TokenBraceClose {
 		return l.NextToken(), nil
 	}
 
 	elemType := dest.Type().Elem()
 
 	for {
-		if tok.Type != TokenString {
+		if tok.Type != lexer.TokenString {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected string key in object, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
 			}
 		}
 
-		key := unescapeTokenString(l.input, tok)
+		key := unescapeTokenString(l.Input, tok)
 
 		tok = l.NextToken() // ':'
-		if tok.Type != TokenColon {
+		if tok.Type != lexer.TokenColon {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected ':' after object key, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -292,16 +333,16 @@ func directDecodeMap(l *Lexer, dest reflect.Value) (Token, error) {
 
 		newElem := reflect.New(elemType).Elem()
 		var err error
-		tok, err = directDecode(l, tok, newElem)
+		tok, err = directDecode(l, tok, newElem, depth+1)
 		if err != nil {
 			return tok, err
 		}
 		dest.SetMapIndex(reflect.ValueOf(key), newElem)
 
-		if tok.Type == TokenBraceClose {
+		if tok.Type == lexer.TokenBraceClose {
 			return l.NextToken(), nil
 		}
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected ',' or '}' after object value, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -312,10 +353,10 @@ func directDecodeMap(l *Lexer, dest reflect.Value) (Token, error) {
 }
 
 // directDecodeArray reads a JSON array and writes elements directly into a slice.
-func directDecodeArray(l *Lexer, dest reflect.Value) (Token, error) {
+func directDecodeArray(l *lexer.Lexer, dest reflect.Value, depth int) (lexer.Token, error) {
 	tok := l.NextToken()
 
-	if tok.Type == TokenBracketClose {
+	if tok.Type == lexer.TokenBracketClose {
 		dest.Set(reflect.MakeSlice(dest.Type(), 0, 0))
 		return l.NextToken(), nil
 	}
@@ -326,22 +367,22 @@ func directDecodeArray(l *Lexer, dest reflect.Value) (Token, error) {
 	for {
 		newElem := reflect.New(elemType).Elem()
 		var err error
-		tok, err = directDecode(l, tok, newElem)
+		tok, err = directDecode(l, tok, newElem, depth+1)
 		if err != nil {
 			return tok, err
 		}
 		slice = reflect.Append(slice, newElem)
 
-		if tok.Type == TokenBracketClose {
+		if tok.Type == lexer.TokenBracketClose {
 			dest.Set(slice)
 			return l.NextToken(), nil
 		}
 
-		if tok.Type == TokenError {
-			return tok, &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+		if tok.Type == lexer.TokenError {
+			return tok, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 		}
 
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return tok, &ParseError{
 				Message: fmt.Sprintf("expected ',' or ']' after array element, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -350,7 +391,7 @@ func directDecodeArray(l *Lexer, dest reflect.Value) (Token, error) {
 
 		tok = l.NextToken()
 
-		if tok.Type == TokenBracketClose {
+		if tok.Type == lexer.TokenBracketClose {
 			return tok, &ParseError{
 				Message: "trailing comma in array is not allowed",
 				Line:    tok.Line, Column: tok.Column,
@@ -359,18 +400,21 @@ func directDecodeArray(l *Lexer, dest reflect.Value) (Token, error) {
 	}
 }
 
-// --- Skip functions: advance past a JSON value without allocating ---
+// Skip functions advance past a JSON value without allocating.
 
-func skipValue(l *Lexer, tok Token) (Token, error) {
+func skipValue(l *lexer.Lexer, tok lexer.Token, depth int) (lexer.Token, error) {
+	if depth > 1000 {
+		return tok, &ParseError{Message: "exceeded max depth limit", Line: tok.Line, Column: tok.Column}
+	}
 	switch tok.Type {
-	case TokenString, TokenNumber, TokenTrue, TokenFalse, TokenNull:
+	case lexer.TokenString, lexer.TokenNumber, lexer.TokenTrue, lexer.TokenFalse, lexer.TokenNull:
 		return l.NextToken(), nil
-	case TokenBraceOpen:
-		return skipObject(l)
-	case TokenBracketOpen:
-		return skipArray(l)
-	case TokenError:
-		return tok, &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+	case lexer.TokenBraceOpen:
+		return skipObject(l, depth+1)
+	case lexer.TokenBracketOpen:
+		return skipArray(l, depth+1)
+	case lexer.TokenError:
+		return tok, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 	default:
 		return tok, &ParseError{
 			Message: fmt.Sprintf("unexpected token %s", tok.Type),
@@ -379,83 +423,92 @@ func skipValue(l *Lexer, tok Token) (Token, error) {
 	}
 }
 
-func skipObject(l *Lexer) (Token, error) {
+func skipObject(l *lexer.Lexer, depth int) (lexer.Token, error) {
+	if depth > 1000 {
+		return lexer.Token{}, &ParseError{Message: "exceeded max depth limit", Line: l.Line, Column: l.Column}
+	}
 	tok := l.NextToken()
-	if tok.Type == TokenBraceClose {
+	if tok.Type == lexer.TokenBraceClose {
 		return l.NextToken(), nil
 	}
 	for {
 		// skip key
-		if tok.Type != TokenString {
+		if tok.Type != lexer.TokenString {
 			return tok, &ParseError{Message: "expected string key", Line: tok.Line, Column: tok.Column}
 		}
 		tok = l.NextToken() // ':'
-		if tok.Type != TokenColon {
+		if tok.Type != lexer.TokenColon {
 			return tok, &ParseError{Message: "expected ':'", Line: tok.Line, Column: tok.Column}
 		}
 		tok = l.NextToken() // value
 		var err error
-		tok, err = skipValue(l, tok)
+		tok, err = skipValue(l, tok, depth+1)
 		if err != nil {
 			return tok, err
 		}
-		if tok.Type == TokenBraceClose {
+		if tok.Type == lexer.TokenBraceClose {
 			return l.NextToken(), nil
 		}
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return tok, &ParseError{Message: "expected ',' or '}'", Line: tok.Line, Column: tok.Column}
 		}
 		tok = l.NextToken()
 	}
 }
 
-func skipArray(l *Lexer) (Token, error) {
+func skipArray(l *lexer.Lexer, depth int) (lexer.Token, error) {
+	if depth > 1000 {
+		return lexer.Token{}, &ParseError{Message: "exceeded max depth limit", Line: l.Line, Column: l.Column}
+	}
 	tok := l.NextToken()
-	if tok.Type == TokenBracketClose {
+	if tok.Type == lexer.TokenBracketClose {
 		return l.NextToken(), nil
 	}
 	for {
 		var err error
-		tok, err = skipValue(l, tok)
+		tok, err = skipValue(l, tok, depth+1)
 		if err != nil {
 			return tok, err
 		}
-		if tok.Type == TokenBracketClose {
+		if tok.Type == lexer.TokenBracketClose {
 			return l.NextToken(), nil
 		}
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return tok, &ParseError{Message: "expected ',' or ']'", Line: tok.Line, Column: tok.Column}
 		}
 		tok = l.NextToken()
 	}
 }
 
-// --- Generic decode (for interface{} destinations) ---
+// Generic decode functions for interface{}/any destinations.
 
-func decodeToAny(l *Lexer, tok Token) (any, Token, error) {
+func decodeToAny(l *lexer.Lexer, tok lexer.Token, depth int) (any, lexer.Token, error) {
+	if depth > 1000 {
+		return nil, tok, &ParseError{Message: "exceeded max depth limit", Line: tok.Line, Column: tok.Column}
+	}
 	switch tok.Type {
-	case TokenNull:
+	case lexer.TokenNull:
 		return nil, l.NextToken(), nil
-	case TokenTrue:
+	case lexer.TokenTrue:
 		return true, l.NextToken(), nil
-	case TokenFalse:
+	case lexer.TokenFalse:
 		return false, l.NextToken(), nil
-	case TokenString:
-		s := unescapeTokenString(l.input, tok)
+	case lexer.TokenString:
+		s := unescapeTokenString(l.Input, tok)
 		return s, l.NextToken(), nil
-	case TokenNumber:
-		raw := l.input[tok.Start:tok.End]
+	case lexer.TokenNumber:
+		raw := l.Input[tok.Start:tok.End]
 		f, err := strconv.ParseFloat(string(raw), 64)
 		if err != nil {
 			return nil, tok, &ParseError{Message: fmt.Sprintf("invalid number: %v", err), Line: tok.Line, Column: tok.Column}
 		}
 		return f, l.NextToken(), nil
-	case TokenBraceOpen:
-		return decodeObjectToAny(l)
-	case TokenBracketOpen:
-		return decodeArrayToAny(l)
-	case TokenError:
-		return nil, tok, &ParseError{Message: l.err, Line: tok.Line, Column: tok.Column}
+	case lexer.TokenBraceOpen:
+		return decodeObjectToAny(l, depth+1)
+	case lexer.TokenBracketOpen:
+		return decodeArrayToAny(l, depth+1)
+	case lexer.TokenError:
+		return nil, tok, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
 	default:
 		return nil, tok, &ParseError{
 			Message: fmt.Sprintf("unexpected token %s", tok.Type),
@@ -464,23 +517,26 @@ func decodeToAny(l *Lexer, tok Token) (any, Token, error) {
 	}
 }
 
-func decodeObjectToAny(l *Lexer) (any, Token, error) {
+func decodeObjectToAny(l *lexer.Lexer, depth int) (any, lexer.Token, error) {
+	if depth > 1000 {
+		return nil, lexer.Token{}, &ParseError{Message: "exceeded max depth limit", Line: l.Line, Column: l.Column}
+	}
 	tok := l.NextToken()
-	if tok.Type == TokenBraceClose {
+	if tok.Type == lexer.TokenBraceClose {
 		return map[string]any{}, l.NextToken(), nil
 	}
 	m := make(map[string]any)
 	for {
-		if tok.Type != TokenString {
+		if tok.Type != lexer.TokenString {
 			return nil, tok, &ParseError{
 				Message: fmt.Sprintf("expected string key, got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
 			}
 		}
-		key := unescapeTokenString(l.input, tok)
+		key := unescapeTokenString(l.Input, tok)
 
 		tok = l.NextToken()
-		if tok.Type != TokenColon {
+		if tok.Type != lexer.TokenColon {
 			return nil, tok, &ParseError{
 				Message: fmt.Sprintf("expected ':', got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -490,16 +546,16 @@ func decodeObjectToAny(l *Lexer) (any, Token, error) {
 
 		var val any
 		var err error
-		val, tok, err = decodeToAny(l, tok)
+		val, tok, err = decodeToAny(l, tok, depth+1)
 		if err != nil {
 			return nil, tok, err
 		}
 		m[key] = val
 
-		if tok.Type == TokenBraceClose {
+		if tok.Type == lexer.TokenBraceClose {
 			return m, l.NextToken(), nil
 		}
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return nil, tok, &ParseError{
 				Message: fmt.Sprintf("expected ',' or '}', got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -509,25 +565,28 @@ func decodeObjectToAny(l *Lexer) (any, Token, error) {
 	}
 }
 
-func decodeArrayToAny(l *Lexer) (any, Token, error) {
+func decodeArrayToAny(l *lexer.Lexer, depth int) (any, lexer.Token, error) {
+	if depth > 1000 {
+		return nil, lexer.Token{}, &ParseError{Message: "exceeded max depth limit", Line: l.Line, Column: l.Column}
+	}
 	tok := l.NextToken()
-	if tok.Type == TokenBracketClose {
+	if tok.Type == lexer.TokenBracketClose {
 		return []any{}, l.NextToken(), nil
 	}
 	arr := make([]any, 0, 4)
 	for {
 		var val any
 		var err error
-		val, tok, err = decodeToAny(l, tok)
+		val, tok, err = decodeToAny(l, tok, depth+1)
 		if err != nil {
 			return nil, tok, err
 		}
 		arr = append(arr, val)
 
-		if tok.Type == TokenBracketClose {
+		if tok.Type == lexer.TokenBracketClose {
 			return arr, l.NextToken(), nil
 		}
-		if tok.Type != TokenComma {
+		if tok.Type != lexer.TokenComma {
 			return nil, tok, &ParseError{
 				Message: fmt.Sprintf("expected ',' or ']', got %s", tok.Type),
 				Line:    tok.Line, Column: tok.Column,
@@ -537,12 +596,12 @@ func decodeArrayToAny(l *Lexer) (any, Token, error) {
 	}
 }
 
-// --- String helpers ---
+// String helpers for escape sequence processing.
 
 // unescapeTokenString converts raw token bytes into a Go string,
 // processing JSON escape sequences. Optimized for the common case
 // where no escape sequences are present (single allocation, no processing).
-func unescapeTokenString(input []byte, tok Token) string {
+func unescapeTokenString(input []byte, tok lexer.Token) string {
 	raw := input[tok.Start:tok.End]
 
 	// Fast path: no backslash means no escape sequences
@@ -677,4 +736,62 @@ func parseUintFromBytes(b []byte) (uint64, bool) {
 		n = n*10 + uint64(c-'0')
 	}
 	return n, true
+}
+
+// extractRawJSON returns the raw JSON bytes corresponding to the value starting at tok,
+// and returns the next unconsumed token.
+func extractRawJSON(l *lexer.Lexer, tok lexer.Token) ([]byte, lexer.Token, error) {
+	startPos := tok.Start
+	if tok.Type == lexer.TokenString {
+		startPos-- // include the opening quote '"'
+	}
+
+	var endPos int
+	var next lexer.Token
+	var err error
+
+	switch tok.Type {
+	case lexer.TokenString:
+		endPos = tok.End + 1
+		next = l.NextToken()
+	case lexer.TokenNumber, lexer.TokenTrue, lexer.TokenFalse, lexer.TokenNull:
+		endPos = tok.End
+		next = l.NextToken()
+	case lexer.TokenBraceOpen, lexer.TokenBracketOpen:
+		var end int
+		if tok.Type == lexer.TokenBraceOpen {
+			end, err = findMatchingClose(l, lexer.TokenBraceOpen, lexer.TokenBraceClose)
+		} else {
+			end, err = findMatchingClose(l, lexer.TokenBracketOpen, lexer.TokenBracketClose)
+		}
+		if err != nil {
+			return nil, lexer.Token{}, err
+		}
+		endPos = end
+		next = l.NextToken()
+	default:
+		return nil, lexer.Token{}, fmt.Errorf("unexpected token for raw JSON extraction: %s", tok.Type)
+	}
+
+	raw := l.Input[startPos:endPos]
+	return raw, next, nil
+}
+
+// findMatchingClose scans tokens until the matching close bracket/brace is found.
+func findMatchingClose(l *lexer.Lexer, open, close lexer.TokenType) (int, error) {
+	depth := 1
+	for depth > 0 {
+		tok := l.NextToken()
+		switch tok.Type {
+		case open:
+			depth++
+		case close:
+			depth--
+		case lexer.TokenEOF:
+			return 0, io.ErrUnexpectedEOF
+		case lexer.TokenError:
+			return 0, &ParseError{Message: l.Error(), Line: tok.Line, Column: tok.Column}
+		}
+	}
+	return l.Pos, nil
 }

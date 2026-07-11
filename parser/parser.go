@@ -1,7 +1,8 @@
-package json_parser
+package parser
 
 import (
 	"fmt"
+	"json_parser/lexer"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -20,15 +21,16 @@ func (e *ParseError) Error() string {
 
 // Parser parses a JSON string from a Lexer into Go structures.
 type Parser struct {
-	lexer        *Lexer
-	currentToken Token
-	peekToken    Token
+	lexer        *lexer.Lexer
+	currentToken lexer.Token
+	peekToken    lexer.Token
+	depth        int
 }
 
 // NewParser creates a new Parser instance.
-func NewParser(lexer *Lexer) *Parser {
+func NewParser(l *lexer.Lexer) *Parser {
 	return &Parser{
-		lexer: lexer,
+		lexer: l,
 	}
 }
 
@@ -51,10 +53,10 @@ func (p *Parser) Parse() (any, error) {
 	p.currentToken = p.lexer.NextToken()
 	p.peekToken = p.lexer.NextToken()
 
-	if p.currentToken.Type == TokenError {
-		return nil, p.error(p.lexer.err)
+	if p.currentToken.Type == lexer.TokenError {
+		return nil, p.error(p.lexer.Error())
 	}
-	if p.currentToken.Type == TokenEOF {
+	if p.currentToken.Type == lexer.TokenEOF {
 		return nil, p.error("empty JSON input")
 	}
 
@@ -63,28 +65,36 @@ func (p *Parser) Parse() (any, error) {
 		return nil, err
 	}
 
-	if p.currentToken.Type == TokenError {
-		return nil, p.error(p.lexer.err)
+	if p.currentToken.Type == lexer.TokenError {
+		return nil, p.error(p.lexer.Error())
 	}
-	if p.currentToken.Type != TokenEOF {
+	if p.currentToken.Type != lexer.TokenEOF {
 		return nil, p.error(fmt.Sprintf("unexpected token at end of input: %s", p.currentToken.Type))
 	}
 
 	return val, nil
 }
 
+const maxDepth = 1000
+
 func (p *Parser) parseValue() (any, error) {
+	p.depth++
+	if p.depth > maxDepth {
+		return nil, p.error("exceeded max depth limit")
+	}
+	defer func() { p.depth-- }()
+
 	switch p.currentToken.Type {
-	case TokenTrue:
+	case lexer.TokenTrue:
 		p.nextToken()
 		return true, nil
-	case TokenFalse:
+	case lexer.TokenFalse:
 		p.nextToken()
 		return false, nil
-	case TokenNull:
+	case lexer.TokenNull:
 		p.nextToken()
 		return nil, nil
-	case TokenNumber:
+	case lexer.TokenNumber:
 		numStr := p.lexer.TokenValue(p.currentToken)
 		val, err := strconv.ParseFloat(numStr, 64)
 		if err != nil {
@@ -92,7 +102,7 @@ func (p *Parser) parseValue() (any, error) {
 		}
 		p.nextToken()
 		return val, nil
-	case TokenString:
+	case lexer.TokenString:
 		raw := p.lexer.TokenValue(p.currentToken)
 		val, err := unescapeString(raw)
 		if err != nil {
@@ -100,12 +110,12 @@ func (p *Parser) parseValue() (any, error) {
 		}
 		p.nextToken()
 		return val, nil
-	case TokenBraceOpen:
+	case lexer.TokenBraceOpen:
 		return p.parseObject()
-	case TokenBracketOpen:
+	case lexer.TokenBracketOpen:
 		return p.parseArray()
-	case TokenError:
-		return nil, p.error(p.lexer.err)
+	case lexer.TokenError:
+		return nil, p.error(p.lexer.Error())
 	default:
 		return nil, p.error(fmt.Sprintf("unexpected token %s", p.currentToken.Type))
 	}
@@ -113,13 +123,13 @@ func (p *Parser) parseValue() (any, error) {
 
 func (p *Parser) parseArray() ([]any, error) {
 	// consume '['
-	if p.currentToken.Type != TokenBracketOpen {
+	if p.currentToken.Type != lexer.TokenBracketOpen {
 		return nil, p.error("expected '['")
 	}
 	p.nextToken()
 
 	arr := []any{}
-	if p.currentToken.Type == TokenBracketClose {
+	if p.currentToken.Type == lexer.TokenBracketClose {
 		p.nextToken()
 		return arr, nil
 	}
@@ -131,22 +141,22 @@ func (p *Parser) parseArray() ([]any, error) {
 		}
 		arr = append(arr, val)
 
-		if p.currentToken.Type == TokenBracketClose {
+		if p.currentToken.Type == lexer.TokenBracketClose {
 			p.nextToken()
 			break
 		}
 
-		if p.currentToken.Type == TokenError {
-			return nil, p.error(p.lexer.err)
+		if p.currentToken.Type == lexer.TokenError {
+			return nil, p.error(p.lexer.Error())
 		}
 
-		if p.currentToken.Type != TokenComma {
+		if p.currentToken.Type != lexer.TokenComma {
 			return nil, p.error(fmt.Sprintf("expected ',' or ']' after array element, got %s", p.currentToken.Type))
 		}
 		p.nextToken() // consume ','
 
 		// Trailing commas are invalid in strict JSON
-		if p.currentToken.Type == TokenBracketClose {
+		if p.currentToken.Type == lexer.TokenBracketClose {
 			return nil, p.error("trailing comma in array is not allowed")
 		}
 	}
@@ -155,22 +165,22 @@ func (p *Parser) parseArray() ([]any, error) {
 
 func (p *Parser) parseObject() (map[string]any, error) {
 	// consume '{'
-	if p.currentToken.Type != TokenBraceOpen {
+	if p.currentToken.Type != lexer.TokenBraceOpen {
 		return nil, p.error("expected '{'")
 	}
 	p.nextToken()
 
 	obj := make(map[string]any)
-	if p.currentToken.Type == TokenBraceClose {
+	if p.currentToken.Type == lexer.TokenBraceClose {
 		p.nextToken()
 		return obj, nil
 	}
 
 	for {
-		if p.currentToken.Type == TokenError {
-			return nil, p.error(p.lexer.err)
+		if p.currentToken.Type == lexer.TokenError {
+			return nil, p.error(p.lexer.Error())
 		}
-		if p.currentToken.Type != TokenString {
+		if p.currentToken.Type != lexer.TokenString {
 			return nil, p.error(fmt.Sprintf("expected string key in object, got %s", p.currentToken.Type))
 		}
 
@@ -181,7 +191,7 @@ func (p *Parser) parseObject() (map[string]any, error) {
 		}
 		p.nextToken() // consume key
 
-		if p.currentToken.Type != TokenColon {
+		if p.currentToken.Type != lexer.TokenColon {
 			return nil, p.error(fmt.Sprintf("expected ':' after object key, got %s", p.currentToken.Type))
 		}
 		p.nextToken() // consume ':'
@@ -192,22 +202,22 @@ func (p *Parser) parseObject() (map[string]any, error) {
 		}
 		obj[key] = val
 
-		if p.currentToken.Type == TokenBraceClose {
+		if p.currentToken.Type == lexer.TokenBraceClose {
 			p.nextToken()
 			break
 		}
 
-		if p.currentToken.Type == TokenError {
-			return nil, p.error(p.lexer.err)
+		if p.currentToken.Type == lexer.TokenError {
+			return nil, p.error(p.lexer.Error())
 		}
 
-		if p.currentToken.Type != TokenComma {
+		if p.currentToken.Type != lexer.TokenComma {
 			return nil, p.error(fmt.Sprintf("expected ',' or '}' after object value, got %s", p.currentToken.Type))
 		}
 		p.nextToken() // consume ','
 
 		// Trailing commas are invalid in strict JSON
-		if p.currentToken.Type == TokenBraceClose {
+		if p.currentToken.Type == lexer.TokenBraceClose {
 			return nil, p.error("trailing comma in object is not allowed")
 		}
 	}

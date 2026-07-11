@@ -1,4 +1,4 @@
-package json_parser
+package lexer
 
 import (
 	"testing"
